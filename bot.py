@@ -1,13 +1,15 @@
 import logging
-
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
-from config import TELEGRAM_TOKEN, SHEET_URL
-from utils import full_stock, PHOTO_COLUMNS  # PHOTO_COLUMNS для авто без фото
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+from config import TELEGRAM_TOKEN, SHEET_URL, GOOGLE_CREDENTIALS_JSON, GOOGLE_SHEET_URL
+from utils import full_stock, PHOTO_COLUMNS
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -25,6 +27,12 @@ reply_keyboard = [
 ]
 markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
 
+# ===== Google Sheets =====
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_JSON, scope)
+client = gspread.authorize(creds)
+gs_sheet = client.open_by_url(GOOGLE_SHEET_URL).sheet1
+
 
 # ===== Загрузка данных =====
 def load_data() -> pd.DataFrame:
@@ -34,7 +42,7 @@ def load_data() -> pd.DataFrame:
         return df
     except Exception as e:
         logger.error(f"Ошибка загрузки данных: {e}")
-        return pd.DataFrame()  # пустой DataFrame, если не получилось
+        return pd.DataFrame()
 
 
 # ===== Форматирование Excel =====
@@ -58,17 +66,21 @@ def format_excel(file_path: str):
                     max_length = len(value)
             except:
                 pass
-        adjusted_width = (max_length + 2)
-        ws.column_dimensions[column].width = adjusted_width
+        ws.column_dimensions[column].width = max_length + 2
 
     wb.save(file_path)
 
 
+# ===== Запись DataFrame в Google Sheets =====
+def write_df_to_sheet(sheet, df: pd.DataFrame):
+    df_clean = df.fillna("")  # заменяем NaN на пустые строки
+    values = [df_clean.columns.tolist()] + df_clean.values.tolist()
+    sheet.update(range_name="A1", values=values)
+
+
 # ===== Команды =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Выберите действие:", reply_markup=markup
-    )
+    await update.message.reply_text("Привет! Выберите действие:", reply_markup=markup)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -84,6 +96,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = "full_stock.xlsx"
         df_full.to_excel(file_path, index=False)
         format_excel(file_path)
+        write_df_to_sheet(gs_sheet, df_full)
         total = len(df_full)
         await update.message.reply_text(f"Полный сток готов. Всего машин: {total}")
         await update.message.reply_document(open(file_path, "rb"))
@@ -93,51 +106,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df_photo = df[df["Кол-во фото для сайта"] == 0]
         df_photo = df_photo.sort_values(by="Дней с даты поступления", ascending=False)
         df_photo = df_photo[PHOTO_COLUMNS]
-
         file_path = "auto_without_photo.xlsx"
         df_photo.to_excel(file_path, index=False)
         format_excel(file_path)
+        write_df_to_sheet(gs_sheet, df_photo)
         total = len(df_photo)
         await update.message.reply_text(f"Авто без фото готово. Всего машин: {total}")
         await update.message.reply_document(open(file_path, "rb"))
         logger.info(f"Отправлен список авто без фото ({total} машин)")
 
-
     elif text == "Авто без места хранения":
         df_full = full_stock(df)
-        # Только авто с фото и без места хранения
         df_no_storage = df_full[
             (df_full["Место хранения"].isna() | (df_full["Место хранения"] == "")) &
             (df_full["Кол-во фото для сайта"] != 0)
-            ]
+        ]
         df_no_storage = df_no_storage.sort_values(by="Дней с даты поступления", ascending=True)
-        # Сообщение с количеством
-        message = f"Авто без места хранения: {len(df_no_storage)} машин"
-        # Сохраняем Excel файл на русском
         file_path = "Авто_без_места.xlsx"
         df_no_storage.to_excel(file_path, index=False)
-        format_excel(file_path)  # функция автоширины и центрирования
-        # Отправка одного сообщения + файла
+        format_excel(file_path)
+        write_df_to_sheet(gs_sheet, df_no_storage)
+        message = f"Авто без места хранения: {len(df_no_storage)} машин"
         await update.message.reply_document(open(file_path, "rb"), caption=message)
         logger.info(f"Отправлен список авто без места хранения ({len(df_no_storage)} машин)")
 
     elif text == "Статистика":
-
         df_full = full_stock(df)
-
-        # полный сток
         total_stock = len(df_full)
-
-        # авто без фото
         no_photo = len(df_full[df_full["Кол-во фото для сайта"] == 0])
-
-        # авто без места хранения (но только с фото)
         no_storage = len(df_full[
-                             (df_full["Место хранения"].isna() | (df_full["Место хранения"] == "")) &
-                             (df_full["Кол-во фото для сайта"] != 0)
-                             ])
-
-        # парковки
+            (df_full["Место хранения"].isna() | (df_full["Место хранения"] == "")) &
+            (df_full["Кол-во фото для сайта"] != 0)
+        ])
         parking_counts = df_full["Место хранения"].fillna("Без места").value_counts()
 
         message = (
@@ -147,40 +147,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Авто без места хранения: {no_storage}\n\n"
             f"Парковки:\n"
         )
-
         for parking, count in parking_counts.items():
             message += f"{parking}: {count}\n"
 
         await update.message.reply_text(message)
-
         logger.info("Отправлена статистика")
 
     elif text == "Поиск ключа":
-
         WAITING_KEY[update.message.chat_id] = True
-
         await update.message.reply_text("Введите номер ключа")
 
     elif WAITING_KEY.get(update.message.chat_id):
-
         WAITING_KEY.pop(update.message.chat_id)
-
         if not text.isdigit():
             await update.message.reply_text("Номер ключа должен быть числом")
             return
-
         key_number = int(text)
-
         df_full = full_stock(df)
-
         car = df_full[df_full["Номер ключа"] == key_number]
-
         if car.empty:
             await update.message.reply_text("Машина не найдена")
             return
-
         car = car.iloc[0]
-
         message = (
             f"🚗 Автомобиль найден\n\n"
             f"Номер ключа: {car['Номер ключа']}\n"
@@ -197,7 +185,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Байер: {car['Байер']}\n"
             f"Тип сделки: {car['Тип сделки']}"
         )
-
         await update.message.reply_text(message)
 
     else:
@@ -207,9 +194,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== Основной запуск =====
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
     logger.info("Бот запущен")
     app.run_polling()
