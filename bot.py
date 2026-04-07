@@ -33,7 +33,6 @@ creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_JSON
 client = gspread.authorize(creds)
 gs_sheet = client.open_by_url(GOOGLE_SHEET_URL).sheet1
 
-
 # ===== Загрузка данных =====
 def load_data() -> pd.DataFrame:
     try:
@@ -43,7 +42,6 @@ def load_data() -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Ошибка загрузки данных: {e}")
         return pd.DataFrame()
-
 
 # ===== Форматирование Excel =====
 def format_excel(file_path: str):
@@ -70,18 +68,20 @@ def format_excel(file_path: str):
 
     wb.save(file_path)
 
-
 # ===== Запись DataFrame в Google Sheets =====
 def write_df_to_sheet(sheet, df: pd.DataFrame):
     df_clean = df.fillna("")  # заменяем NaN на пустые строки
     values = [df_clean.columns.tolist()] + df_clean.values.tolist()
-    sheet.update(range_name="A1", values=values)
 
+    # Очищаем лист перед записью
+    sheet.clear()
+
+    # Записываем новые данные
+    sheet.update(range_name="A1", values=values)
 
 # ===== Команды =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Выберите действие:", reply_markup=markup)
-
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -117,8 +117,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "Авто без места хранения":
         df_full = full_stock(df)
+        # Только машины без места хранения и с фото
         df_no_storage = df_full[
-            (df_full["Место хранения"].isna() | (df_full["Место хранения"] == "")) &
+            ((df_full["Место хранения"].isna()) | (df_full["Место хранения"] == "")) &
             (df_full["Кол-во фото для сайта"] != 0)
         ]
         df_no_storage = df_no_storage.sort_values(by="Дней с даты поступления", ascending=True)
@@ -135,7 +136,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_stock = len(df_full)
         no_photo = len(df_full[df_full["Кол-во фото для сайта"] == 0])
         no_storage = len(df_full[
-            (df_full["Место хранения"].isna() | (df_full["Место хранения"] == "")) &
+            ((df_full["Место хранения"].isna()) | (df_full["Место хранения"] == "")) &
             (df_full["Кол-во фото для сайта"] != 0)
         ])
         parking_counts = df_full["Место хранения"].fillna("Без места").value_counts()
@@ -189,7 +190,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         await update.message.reply_text("Неизвестная команда. Попробуйте ещё раз.")
-
 
 # ===== Основной запуск =====
 if __name__ == "__main__":
